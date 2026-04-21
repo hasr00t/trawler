@@ -1,0 +1,407 @@
+# Trawler — extended TruffleHog v3 detector set
+#
+# Load with:  trufflehog filesystem --config=config/trufflehog-custom.yaml ...
+#
+# These augment TruffleHog's built-in detectors (which already cover AWS keys,
+# GCP, Azure, Stripe, GitHub, Slack, Okta, private keys, etc.) with:
+#   - Regulated US PII (SSN, ITIN, PAN, bank routing, passport, DL, DEA,
+#     MBI/HICN, IBAN)
+#   - Document-context credential patterns commonly seen in scanned onboarding
+#     sheets, "new hire" docs, helpdesk screenshots, and printed config files
+#
+# Notes on TruffleHog custom detectors:
+#   - Go RE2 syntax: no backreferences, no lookbehind, BUT negative/positive
+#     lookahead (?!...) (?=...) are supported.
+#   - Keywords are required. TruffleHog only runs the regex near a keyword.
+#     Pick them broad enough that real-world HR/finance docs trip them.
+#   - Raw matches land in the finding's `Raw` field; post-filters in
+#     bin/07_luhn_filter.py perform Luhn/ABA validation to cut noise.
+
+detectors:
+
+  # -----------------------------------------------------------------------
+  # US Social Security Number
+  # Format rules: area != 000|666|9xx ; group != 00 ; serial != 0000.
+  # Matches with or without hyphen/space separators.
+  # -----------------------------------------------------------------------
+  - name: US Social Security Number
+    keywords:
+      - ssn
+      - social security
+      - social sec
+      - ss#
+      - ss #
+      - soc sec
+      - employee
+      - patient
+      - member
+      - taxpayer
+      - date of birth
+      - dob
+    regex:
+      ssn: '(?i)\b(?!000|666|9\d{2})[0-8]\d{2}[-\s]?(?!00)\d{2}[-\s]?(?!0000)\d{4}\b'
+
+  # -----------------------------------------------------------------------
+  # US Individual Taxpayer Identification Number (ITIN)
+  # Area = 9xx ; group 70-88, 90-92, 94-99.
+  # -----------------------------------------------------------------------
+  - name: US ITIN
+    keywords:
+      - itin
+      - taxpayer
+      - tax id
+      - w-7
+      - w7
+      - "1099"
+      - "1040"
+    regex:
+      itin: '\b9\d{2}[-\s]?(7\d|8[0-8]|9[0-2]|9[4-9])[-\s]?\d{4}\b'
+
+  # -----------------------------------------------------------------------
+  # US Employer Identification Number (EIN)
+  # Format: 2 digits + 7 digits, with specific valid prefixes.
+  # -----------------------------------------------------------------------
+  - name: US EIN
+    keywords:
+      - ein
+      - employer id
+      - federal tax id
+      - fein
+      - tax id number
+      - w-9
+    regex:
+      ein: '\b(0[1-6]|1[0-6]|2[0-7]|[3-6]\d|7[0-7]|8[0-8]|9[0-58-9])-\d{7}\b'
+
+  # -----------------------------------------------------------------------
+  # Credit card / PAN (Visa, MC, Amex, Discover, JCB, Diners)
+  # Accepts optional spaces/hyphens between groups. Luhn check is performed
+  # in bin/07_luhn_filter.py; unvalidated matches are kept but marked.
+  # -----------------------------------------------------------------------
+  - name: Credit Card PAN
+    keywords:
+      - card
+      - cc#
+      - cc number
+      - credit card
+      - visa
+      - mastercard
+      - amex
+      - discover
+      - payment
+      - account number
+      - billing
+    regex:
+      visa: '\b4\d{3}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b'
+      mastercard: '\b(5[1-5]\d{2}|2[2-7]\d{2})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b'
+      amex: '\b3[47]\d{2}[-\s]?\d{6}[-\s]?\d{5}\b'
+      discover: '\b6(?:011|5\d{2}|4[4-9]\d)[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b'
+      jcb: '\b35\d{2}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b'
+      diners: '\b3(?:0[0-5]|[68]\d)\d[-\s]?\d{6}[-\s]?\d{4}\b'
+
+  # -----------------------------------------------------------------------
+  # US bank routing number (ABA). 9 digits; ABA checksum validated in
+  # bin/07_luhn_filter.py. First two digits are 00-12, 21-32, 61-72, 80.
+  # -----------------------------------------------------------------------
+  - name: US ABA Routing Number
+    keywords:
+      - routing
+      - aba
+      - rtn
+      - direct deposit
+      - wire
+      - ach
+      - bank
+    regex:
+      routing: '\b(0[0-9]|1[0-2]|2[1-9]|3[0-2]|6[1-9]|7[0-2]|80)\d{7}\b'
+
+  # -----------------------------------------------------------------------
+  # US passport (new: letter + 8 digits; old: 9 digits near keyword)
+  # -----------------------------------------------------------------------
+  - name: US Passport Number
+    keywords:
+      - passport
+      - us passport
+      - travel document
+      - i-9
+    regex:
+      passport_new: '\b[A-Z]\d{8}\b'
+      passport_old: '\b\d{9}\b'
+
+  # -----------------------------------------------------------------------
+  # US driver's license (generic: many state formats; 1 letter + 7-13
+  # digits, or 7-9 digits). Noisy - keep tight keyword list.
+  # -----------------------------------------------------------------------
+  - name: US Drivers License
+    keywords:
+      - driver
+      - driver's license
+      - drivers license
+      - dl#
+      - dl no
+      - license number
+      - state id
+    regex:
+      dl_alpha: '\b[A-Z]\d{6,12}\b'
+      dl_numeric: '\b\d{7,9}\b'
+
+  # -----------------------------------------------------------------------
+  # DEA registration number. 2 letters + 7 digits; first letter identifies
+  # registrant type (A, B, F, G, M, P, R). Checksum validated elsewhere.
+  # -----------------------------------------------------------------------
+  - name: DEA Number
+    keywords:
+      - dea
+      - dea #
+      - controlled substance
+      - prescriber
+      - npi
+    regex:
+      dea: '\b[ABFGMPR][A-Z]\d{7}\b'
+
+  # -----------------------------------------------------------------------
+  # Medicare Beneficiary Identifier (MBI) -- replaced HICN/SSN in 2020.
+  # 11 chars: C A AN N A AN N A N N, where C is digit 1-9, A is letter
+  # (no S,L,O,I,B,Z), N is digit, AN is letter-or-digit.
+  # -----------------------------------------------------------------------
+  - name: Medicare Beneficiary Identifier
+    keywords:
+      - medicare
+      - mbi
+      - cms
+      - beneficiary
+      - patient id
+    regex:
+      mbi: '\b[1-9](?:[A-HJ-NP-RT-Y])(?:[0-9A-HJ-NP-RT-Y])\d(?:[A-HJ-NP-RT-Y])(?:[0-9A-HJ-NP-RT-Y])\d(?:[A-HJ-NP-RT-Y]){2}\d{2}\b'
+
+  # -----------------------------------------------------------------------
+  # Legacy HICN (Medicare claim number, pre-2020). SSN-style + letter suffix.
+  # -----------------------------------------------------------------------
+  - name: Medicare HICN (legacy)
+    keywords:
+      - hicn
+      - medicare claim
+      - medicare id
+    regex:
+      hicn: '\b\d{3}-?\d{2}-?\d{4}-?[A-Z]{1,2}\d?\b'
+
+  # -----------------------------------------------------------------------
+  # IBAN - international bank account number. 2 letter country code +
+  # 2 check digits + 11-30 alphanumeric. Country-specific length validation
+  # is done in 07_luhn_filter.py (IBAN mod-97 check).
+  # -----------------------------------------------------------------------
+  - name: IBAN
+    keywords:
+      - iban
+      - bank
+      - account
+      - wire
+      - swift
+    regex:
+      iban: '\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b'
+
+  # -----------------------------------------------------------------------
+  # Date of birth near common PII labels. Accepts MM/DD/YYYY, M/D/YY,
+  # YYYY-MM-DD, Month DD, YYYY. Deliberately requires a DOB keyword nearby.
+  # -----------------------------------------------------------------------
+  - name: Date of Birth
+    keywords:
+      - date of birth
+      - dob
+      - d.o.b.
+      - birthdate
+      - birthday
+      - born on
+    regex:
+      dob_numeric: '\b(0?[1-9]|1[0-2])[/\-\.](0?[1-9]|[12]\d|3[01])[/\-\.](19|20)\d{2}\b'
+      dob_iso: '\b(19|20)\d{2}[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b'
+      dob_longform: '\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+(19|20)\d{2}\b'
+
+  # -----------------------------------------------------------------------
+  # Printed/plaintext passwords in documents. TruffleHog has some built-in
+  # "generic password" detectors but these catch the specific formats you
+  # find in scanned onboarding sheets and printed config screenshots.
+  # -----------------------------------------------------------------------
+  - name: Document Password Pattern
+    keywords:
+      - password
+      - passwd
+      - pwd
+      - pass
+      - passphrase
+      - temp password
+      - temporary password
+      - initial password
+      - default password
+      - credentials
+    regex:
+      kv_password: '(?i)(?:password|passwd|pwd|passphrase)\s*[:=]\s*[''"]?([^\s''"<>]{6,64})[''"]?'
+      labeled_password: '(?i)(?:temp(?:orary)?|initial|default|new)\s+password\s*[:=]?\s*[''"]?([^\s''"<>]{6,64})[''"]?'
+
+  # -----------------------------------------------------------------------
+  # Username/password pair common in scanned new-hire docs and helpdesk
+  # screenshots. Catches "Username: jsmith / Password: Welcome123".
+  # -----------------------------------------------------------------------
+  - name: Document Username Password Pair
+    keywords:
+      - username
+      - user name
+      - login
+      - user id
+    regex:
+      pair: '(?is)(?:username|user\s?name|login|user\s?id)\s*[:=]\s*[''"]?([^\s''"<>]{2,64})[''"]?[\s,;/]+(?:password|passwd|pwd)\s*[:=]\s*[''"]?([^\s''"<>]{6,64})[''"]?'
+
+  # -----------------------------------------------------------------------
+  # Common database connection strings in config files and printed docs.
+  # -----------------------------------------------------------------------
+  - name: DB Connection String
+    keywords:
+      - connection
+      - conn str
+      - connectionstring
+      - jdbc
+      - odbc
+      - server=
+      - data source
+    regex:
+      jdbc: '(?i)jdbc:[a-z0-9]+://[^\s''"<>]+'
+      ado_sqlserver: '(?i)(?:server|data source)\s*=\s*[^;]+;[^;]*user\s*(?:id)?\s*=\s*[^;]+;[^;]*password\s*=\s*[^;''"<>]+'
+      postgres_url: '(?i)postgres(?:ql)?://[^\s''"<>@]+:[^\s''"<>@]+@[^\s''"<>/]+'
+      mysql_url: '(?i)mysql://[^\s''"<>@]+:[^\s''"<>@]+@[^\s''"<>/]+'
+      mongo_url: '(?i)mongodb(?:\+srv)?://[^\s''"<>@]+:[^\s''"<>@]+@[^\s''"<>/]+'
+
+  # -----------------------------------------------------------------------
+  # PEM-encoded private keys. TruffleHog built-in covers these; included
+  # here as belt-and-suspenders because OCR'd scans of printed keys often
+  # have minor character errors that defeat strict built-in parsing.
+  # -----------------------------------------------------------------------
+  - name: PEM Private Key Block
+    keywords:
+      - BEGIN
+      - PRIVATE KEY
+      - RSA
+      - OPENSSH
+      - DSA
+      - EC PRIVATE
+    regex:
+      pem_header: '-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----'
+
+  # -----------------------------------------------------------------------
+  # PuTTY private key header (common in printed ops runbooks).
+  # -----------------------------------------------------------------------
+  - name: PuTTY Private Key
+    keywords:
+      - PuTTY-User-Key
+      - ppk
+    regex:
+      ppk: 'PuTTY-User-Key-File-\d:'
+
+  # -----------------------------------------------------------------------
+  # Wi-Fi PSK printed on onboarding docs.
+  # -----------------------------------------------------------------------
+  - name: WiFi PSK
+    keywords:
+      - wifi
+      - wi-fi
+      - wireless
+      - ssid
+      - wpa
+      - network key
+      - psk
+    regex:
+      psk: '(?i)(?:wpa[- ]?(?:2|3)?(?:[- ]?psk)?|network\s+key|passphrase)\s*[:=]\s*[''"]?([^\s''"<>]{8,63})[''"]?'
+
+  # =======================================================================
+  # PHI (Protected Health Information) -- HIPAA-regulated identifiers.
+  # These complement the MBI / HICN / DEA detectors above.
+  # =======================================================================
+
+  # -----------------------------------------------------------------------
+  # US National Provider Identifier (NPI). 10 digits. Validated via the CMS
+  # check-digit procedure: prepend Issuer ID "80840" and run Luhn mod-10.
+  # Validation lives in bin/07_luhn_filter.py; unvalidated matches are kept
+  # but demoted.
+  # -----------------------------------------------------------------------
+  - name: US NPI
+    keywords:
+      - npi
+      - national provider
+      - provider id
+      - provider number
+      - rendering provider
+      - billing provider
+      - prescriber
+    regex:
+      npi: '\b[1-9]\d{9}\b'
+
+  # -----------------------------------------------------------------------
+  # Medical Record Number (MRN). No universal format; most health systems
+  # assign 6-10 alphanumerics. The generic regex anchors on a labeled key
+  # ("MRN:", "Chart #", etc.) to cut noise. Add a client-specific named
+  # regex here once you know their pattern.
+  # -----------------------------------------------------------------------
+  - name: Medical Record Number
+    keywords:
+      - mrn
+      - medical record
+      - chart number
+      - chart #
+      - patient record
+      - record number
+      - encounter id
+      - patient id
+    regex:
+      mrn_labeled: '(?i)(?:mrn|medical\s+record(?:\s+number)?|chart\s*#?|encounter\s*id|patient\s*id)\s*[:=#]?\s*([A-Z0-9-]{6,12})\b'
+
+  # -----------------------------------------------------------------------
+  # ICD-10-CM diagnosis codes. Letter (A-T, V-Z; U reserved) + 2 digits,
+  # optional decimal and 1-4 further alphanumerics. Keyword-gated because
+  # the shape alone matches many generic alphanumeric strings.
+  # -----------------------------------------------------------------------
+  - name: ICD-10 Diagnosis Code
+    keywords:
+      - icd
+      - icd-10
+      - icd10
+      - diagnosis
+      - dx
+      - primary dx
+      - admitting diagnosis
+      - discharge diagnosis
+    regex:
+      icd10: '\b[A-TV-Z]\d{2}(?:\.\d{1,4})?\b'
+
+  # -----------------------------------------------------------------------
+  # CPT / HCPCS procedure codes. CPT is 5 digits, HCPCS Level II is
+  # letter + 4 digits. Strong keyword list required -- CPT alone matches
+  # ZIP codes and every other 5-digit number on the planet.
+  # -----------------------------------------------------------------------
+  - name: CPT Procedure Code
+    keywords:
+      - cpt
+      - hcpcs
+      - procedure code
+      - service code
+      - billing code
+    regex:
+      cpt: '\b\d{5}\b'
+      hcpcs: '\b[A-V]\d{4}\b'
+
+  # -----------------------------------------------------------------------
+  # Medication / Rx line. Catches drug-dose shorthand common on discharge
+  # summaries, scanned prescriptions, and medication administration records.
+  # Fires on a dose expression near an Rx keyword, or an explicit "Sig:" line.
+  # -----------------------------------------------------------------------
+  - name: Medication / Rx
+    keywords:
+      - rx
+      - prescription
+      - medication
+      - prescribed
+      - dispense
+      - refill
+      - sig:
+      - tablet
+      - capsule
+    regex:
+      dose: '\b\d{1,4}(?:\.\d+)?\s*(?:mg|mcg|g|mL|ml|units?|iu)\b'
+      sig_line: '(?i)\bsig:\s*[^\n\r]{3,80}'
